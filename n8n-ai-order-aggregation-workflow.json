@@ -1,0 +1,1393 @@
+{
+  "name": "n8n-ai-order-automation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "daysInterval": 2
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1168,
+        -320
+      ],
+      "id": "dff47f5a-0a04-4fd3-9889-bb20a73a8d16",
+      "name": "Every 2 Days"
+    },
+    {
+      "parameters": {
+        "method": "=GET",
+        "url": "={{ \n  \"https:// your url\" + \n  encodeURIComponent(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()) + \n  \"&created_at_max=\" + \n  encodeURIComponent(new Date().toISOString()) \n}}\n",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {}
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -960,
+        -320
+      ],
+      "id": "1435a857-1b01-4d5c-8dcb-a879a9011c86",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "jsCode": "const output = [];\nconst orders = items[0].json.orders || [];\n\nfor (const order of orders) {\n  const isUnfulfilled = order.fulfillment_status === null || order.fulfillment_status === 'unfulfilled';\n  if (!isUnfulfilled) continue;\n\n  const noteAttrs = order.note_attributes || [];\n  const deliveryDateStr = (noteAttrs.find(a => a.name === 'Delivery-Date') || {}).value;\n  const orderDateStr    = (noteAttrs.find(a => a.name === 'Order-Date')   || {}).value;\n\n  const today = new Date();\n  let passFilter = true; // افتراضياً يدخل\n\n  // ✅ لو في Delivery-Date نطبّق الشرط، لو مش موجود يدخل تلقائيًا\n  if (deliveryDateStr && orderDateStr) {\n    const deliveryDate = new Date(deliveryDateStr);\n    const orderDate = new Date(orderDateStr);\n    const diffOrderToDelivery = Math.ceil((deliveryDate - orderDate) / (1000 * 60 * 60 * 24));\n    const diffDeliveryToToday = Math.ceil((deliveryDate - today) / (1000 * 60 * 60 * 24));\n\n    passFilter = !(diffOrderToDelivery > 2 && diffDeliveryToToday > 2);\n  }\n\n  // ⚠️ لو عنده Delivery-Date بس مافهوش Order-Date → اعتبره صالح\n  else if (deliveryDateStr && !orderDateStr) {\n    passFilter = true;\n  }\n\n  // ⚠️ لو مافهوش Delivery-Date أو Order-Date → اعتبره صالح برضو\n  else if (!deliveryDateStr || !orderDateStr) {\n    passFilter = true;\n  }\n\n  // ⛔ لو الشرط مش متحقق تجاهل الطلب\n  if (!passFilter) continue;\n\n  const orderNumber = order.order_number;\n  const lineItems   = order.line_items || [];\n\n  for (const item of lineItems) {\n    const title = item.title || '';\n\n    // ✅ منطق المارينيتد الصحيح\n    const titleText = (title?.toLowerCase() || '');\n    const isMarinated = titleText.includes('marinated') && !titleText.includes('unmarinated');\n    const marinatedByName = isMarinated ? 'Yes' : 'No';\n\n    // ✅ أضف الـ variant_title\n    const variantTitle = item.variant_title || 'Default';\n\n    output.push({\n      json: {\n        order_number: orderNumber,\n        title,\n        variant_title: variantTitle,\n        grams: item.grams,\n        quantity: item.quantity || 1,\n        fulfillment_status: order.fulfillment_status,\n        product_id: item.product_id,\n        marinated: marinatedByName,\n        product_type: '',\n        collections: 'Loading…'\n      }\n    });\n  }\n}\n\nreturn output;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -768,
+        -320
+      ],
+      "id": "eeeb1bd7-e4da-4f13-a6d7-34eb432a66f0",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "jsCode": "const grouped = {};\n\nfor (const item of items) {\n  const data = item.json;\n  const fullTitle = data.title || '';\n  const variantTitle = data.variant_title || '';\n  const productType = data.product_type || '';\n  const marinated = data.marinated || '';\n  const quantity = Number(data.quantity) || 0;\n  const weight = Number(data.total_weight_kg) || 0;\n  \n  // 🔢 استخدام عدد القطع المستخرج مسبقاً\n  const numOfPieces = Number(data.num_of_pieces) || 0;\n  const totalPieces = quantity * numOfPieces;\n  \n  // 🍔 معالجة Chicken Burger و Premium Hamburger كمنتجات مفرومة\n  const isChickenBurger = /chicken\\s*burger/i.test(fullTitle);\n  const isPremiumHamburger = /premium\\s*hamburger/i.test(fullTitle);\n  \n  // 🥩 معالجة Boneless Drumsticks/Thighs\n  const isBonelessDrumsticks = /chicken\\s*drumsticks.*boneless/i.test(fullTitle);\n  const isBonelessThighs = /chicken\\s*thighs.*boneless/i.test(fullTitle);\n  const isWholeThighsBoneless = /chicken\\s*whole\\s*thighs.*boneless/i.test(fullTitle);\n  \n  // تحديد إذا كان المنتج minced أو kofta\n  const isMincedOrKofta = /(minced|kofta)/i.test(fullTitle);\n  \n  let key, displayTitle;\n  \n  // 🍗 جمع Boneless Drumsticks/Thighs\n  if (isBonelessDrumsticks || isBonelessThighs || isWholeThighsBoneless) {\n    key = 'boneless_chicken_parts';\n    displayTitle = 'Chicken Whole Thighs - Boneless';\n  }\n  // 🍔 جمع Chicken Burger مع Minced Chicken\n  else if (isChickenBurger) {\n    key = 'minced_kofta_chicken';\n    displayTitle = 'Minced Chicken';\n  }\n  // 🍔 جمع Premium Hamburger مع Minced Meat\n  else if (isPremiumHamburger) {\n    key = 'minced_kofta_meat';\n    displayTitle = 'Minced Meat';\n  }\n  // 🥩 جمع Minced/Kofta حسب النوع\n  else if (isMincedOrKofta) {\n    const typeKey = productType.toLowerCase().includes('chicken') ? 'chicken' : 'meat';\n    key = `minced_kofta_${typeKey}`;\n    displayTitle = typeKey === 'chicken' ? 'Minced Chicken' : 'Minced Meat';\n  }\n  // 📦 باقي المنتجات تستخدم الاسم الكامل\n  else {\n    key = fullTitle.toLowerCase().trim();\n    displayTitle = fullTitle.trim();\n  }\n  \n  // إنشاء المجموعة إذا لم تكن موجودة\n  if (!grouped[key]) {\n    grouped[key] = {\n      title: displayTitle,\n      product_type: productType,\n      total_weight_kg: 0,\n      total_pieces: 0,\n      marinated_states: new Set(),\n      names: new Set(),\n      use_weight_for_display: false // علم خاص لتحديد طريقة العرض\n    };\n  }\n  \n  // 🍔 Chicken Burger و Premium Hamburger يستخدمون الوزن فقط\n  if (isChickenBurger || isPremiumHamburger) {\n    grouped[key].total_weight_kg += weight;\n    grouped[key].use_weight_for_display = true;\n  } else {\n    grouped[key].total_weight_kg += weight;\n    grouped[key].total_pieces += totalPieces;\n  }\n  \n  grouped[key].marinated_states.add(marinated);\n  grouped[key].names.add(fullTitle);\n}\n\n// تحويل النتائج النهائية\nlet results = Object.values(grouped).map(entry => {\n  let marinatedFinal = 'No';\n  if (entry.marinated_states.has('Yes') && entry.marinated_states.has('No')) {\n    marinatedFinal = 'Mixed';\n  } else if (entry.marinated_states.has('Yes')) {\n    marinatedFinal = 'Yes';\n  }\n  \n  // تحديد طريقة العرض: وزن أو قطع\n  let finalWeightOrPieces;\n  if (entry.use_weight_for_display) {\n    // المنتجات التي تستخدم الوزن فقط (Burgers)\n    finalWeightOrPieces = entry.total_weight_kg.toFixed(2);\n  } else if (entry.total_pieces > 0) {\n    // المنتجات التي لها قطع\n    finalWeightOrPieces = `${entry.total_pieces} ST`;\n  } else {\n    // المنتجات التي تستخدم الوزن\n    finalWeightOrPieces = entry.total_weight_kg.toFixed(2);\n  }\n  \n  return {\n    json: {\n      title: entry.title,\n      product_type: entry.product_type,\n      total_weight_kg: finalWeightOrPieces,\n      marinated: marinatedFinal\n    }\n  };\n});\n\n// ترتيب حسب النوع\nresults.sort((a, b) => {\n  return (a.json.product_type || '').localeCompare(b.json.product_type || '');\n});\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        928,
+        -544
+      ],
+      "id": "31041147-4e0b-4fc1-b79e-08adce81b3a8",
+      "name": "Group for Butcher"
+    },
+    {
+      "parameters": {
+        "jsCode": "const grouped = {};\n\nfor (const item of items) {\n  const data = item.json;\n  \n  // ✅ نشتغل فقط على العناصر marinated = Yes\n  if (String(data.marinated || '').toLowerCase() !== 'yes') continue;\n  \n  const title = data.title || '';\n  const variantTitle = data.variant_title || '';\n  const quantity = Number(data.quantity) || 0;\n  const weight = Number(data.total_weight_kg) || 0;\n  \n  // 🧮 استخراج عدد القطع من الـ variant_title (مثلاً \"5 Pieces\" أو \"3 pcs\")\n  const pieceMatch = variantTitle.match(/(\\d+)\\s*(?:pieces?|pcs?)/i);\n  const piecesPerUnit = pieceMatch ? Number(pieceMatch[1]) : 0;\n  \n  // ✅ حساب إجمالي القطع = الكمية × عدد القطع في كل وحدة\n  const totalPieces = quantity * piecesPerUnit;\n  \n  // 🔹 استخراج اسم الـ Marinade فقط\n  let marinadeOnly = variantTitle;\n  \n  // أولاً: نقسم على / أو -\n  const parts = variantTitle.split(/\\s*[\\/\\-]\\s*/);\n  \n  // نلاقي الجزء اللي فيه كلمة \"Marinade\"\n  for (const part of parts) {\n    if (/marinade/i.test(part)) {\n      marinadeOnly = part\n        .replace(/^[⭐★✨]\\s*/, '') // شيل الرموز من الأول\n        .replace(/\\s*\\([^)]*\\)/g, '') // شيل أي حاجة بين أقواس مثل (House Special)\n        .replace(/\\s*\\d+\\s*(?:g|kg|piece|pcs|pieces).*/gi, '') // شيل الأوزان والقطع\n        .trim();\n      break;\n    }\n  }\n  \n  // 🔑 المفتاح = title + variant_title الكامل (للتجميع الصحيح)\n  const groupKey = `${title}|||${variantTitle}`;\n  \n  // ✅ إنشاء العنصر لو مش موجود\n  if (!grouped[groupKey]) {\n    grouped[groupKey] = {\n      title,\n      variant_title: marinadeOnly, // 👈 اسم الـ Marinade بس\n      total_weight_kg: 0,\n      num_of_pieces: 0,\n      quantity_total: 0\n    };\n  }\n  \n  // ✅ لو المنتج فيه قطع → اجمع القطع وخلي الوزن صفر\n  if (piecesPerUnit > 0) {\n    grouped[groupKey].num_of_pieces += totalPieces;\n    grouped[groupKey].total_weight_kg = 0;\n  } \n  // ✅ لو مش قطعة → اجمع الوزن عادي\n  else {\n    grouped[groupKey].total_weight_kg += weight;\n  }\n  \n  // ✅ اجمع الكمية في كل الحالات\n  grouped[groupKey].quantity_total += quantity;\n}\n\n// ✅ رجّع الناتج النهائي مرتب حسب اسم المنتج (title)\nreturn Object.values(grouped)\n  .sort((a, b) => a.title.localeCompare(b.title)) // 👈 الترتيب الأبجدي\n  .map(entry => ({ json: entry }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        928,
+        -304
+      ],
+      "id": "d47b6e56-9fcb-4d00-913c-3b2b95199d04",
+      "name": "Group for Chef",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Flatten \"items\" array so each product gets its own row\nconst output = [];\n\nfor (const entry of items) {\n  const orderNumber = entry.json.order_number;\n  const itemList = entry.json.items;\n\n  // ✅ Check if itemList is actually an array before looping\n  if (Array.isArray(itemList)) {\n    for (const item of itemList) {\n      output.push({\n        json: {\n          order_number: orderNumber,\n          title: item.title || '',\n          variant_title: item.variant_title || '',     // ✅ تمت الإضافة\n          grams: item.grams || null,\n          quantity: item.quantity || 0,                // ✅ تمت الإضافة\n          is_piece: item.is_piece || 'No',             // ✅ تمت الإضافة\n          marinated: item.marinated || '',\n        },\n      });\n    }\n  } else {\n    // ✅ If not an array, push a single entry\n    output.push({\n      json: {\n        order_number: orderNumber,\n        title: entry.json.title || '',\n        variant_title: entry.json.variant_title || '', // ✅ تمت الإضافة\n        grams: entry.json.grams || null,\n        quantity: entry.json.quantity || 0,            // ✅ تمت الإضافة\n        is_piece: entry.json.is_piece || 'No',         // ✅ تمت الإضافة\n        marinated: entry.json.marinated || '',\n      },\n    });\n  }\n}\n\nreturn output;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        928,
+        -32
+      ],
+      "id": "d5fef124-d167-41a2-b1d8-c7115ce4a500",
+      "name": "Group Orders for Chef"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "57565312-77e9-449a-8638-ed545653ae13",
+              "name": "branchName",
+              "value": "Group_for_Butcher",
+              "type": "string"
+            },
+            {
+              "id": "ddf9cab0-dc71-4c3f-9cf1-9f1eec758b23",
+              "name": "dateStr",
+              "value": "={{ DateTime.now().setZone('Europe/Berlin').toFormat('yyyy-MM-dd').trim() }}",
+              "type": "string"
+            },
+            {
+              "id": "8292cd86-a55e-49df-95cb-08242a7fdc76",
+              "name": "sheetName",
+              "value": "={{ ('Group_for_Butcher_' + DateTime.now().setZone('Europe/Berlin').toFormat('yyyy-MM-dd')).trim() }}",
+              "type": "string"
+            },
+            {
+              "id": "9ee14cb6-4988-446c-b79d-adb55a60a069",
+              "name": "parentFolderId",
+              "value": "1AEte56rTsBu9uDZ9ubvr4xcrG4Vws5MJ",
+              "type": "string"
+            },
+            {
+              "id": "b0ca8052-dc73-4760-b242-34dbdf178328",
+              "name": "makePdf",
+              "value": "true",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1248,
+        -544
+      ],
+      "id": "13b682c5-5805-4b43-b946-df7dde9b6522",
+      "name": "Edit Fields1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Add createdAt field with only the date (YYYY-MM-DD) in German timezone\nreturn items.map(item => {\n  // Format date in German time\n  let createdAt = new Date()\n    .toLocaleDateString('sv-SE', { timeZone: 'Europe/Berlin' })\n    .replace(/\\s+/g, '') // remove any stray spaces\n    .replace(/\\n/g, '')  // remove any hidden newlines\n    .trim();             // final clean-up\n\n  // Also clean up any existing string fields that could carry \\n\n  const cleanJson = {};\n  for (const [key, value] of Object.entries(item.json)) {\n    cleanJson[key] = typeof value === 'string'\n      ? value.replace(/\\s+/g, ' ').replace(/\\n/g, '').trim()\n      : value;\n  }\n\n  // Add createdAt\n  cleanJson.createdAt = createdAt;\n\n  return { json: cleanJson };\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1504,
+        -576
+      ],
+      "id": "b9611c8b-3db9-44c6-84ea-eda353b2abfc",
+      "name": "createdAt"
+    },
+    {
+      "parameters": {
+        "jsCode": "// For Chef\nreturn items.map(item => {\n  item.binary.data.fileName = \"Chef_Report.xlsx\";\n  return item;\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2672,
+        -304
+      ],
+      "id": "cdba121c-1058-4c68-a24c-e517f4921a24",
+      "name": "For Chef"
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map(item => {\n  item.binary.data.fileName = \"Butcher_Report.xlsx\";\n  return item;\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2672,
+        -544
+      ],
+      "id": "793ead94-7063-44a7-bc1c-2b685d89d94e",
+      "name": "Butcher_Report"
+    },
+    {
+      "parameters": {
+        "jsCode": "// For Orders\nreturn items.map(item => {\n  item.binary.data.fileName = \"Orders_Report.xlsx\";\n  return item;\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2672,
+        -32
+      ],
+      "id": "66453ddc-d43d-498a-a20a-a6855082ad7f",
+      "name": "For Orders"
+    },
+    {
+      "parameters": {
+        "numberInputs": 3
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        3632,
+        -336
+      ],
+      "id": "21cbe344-c175-4cb1-888c-d8b1365bf1fd",
+      "name": "Merge",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "sendTo": "melfeteky@gmail.com",
+        "subject": "=Daily Reports - {{ new Date().toLocaleDateString('en-GB', { timeZone: 'Europe/Berlin' }) }}",
+        "message": "=<div style=\"font-family: Arial, sans-serif; font-size: 15px; color: #333; line-height: 1.6;\">\n  <p>👋 <strong>Hello Team,</strong></p>\n  \n  <p>Please find attached today’s reports:</p>\n  \n  <ul style=\"margin: 10px 0 20px 20px;\">\n    <li>📊 <strong>Butcher Report</strong></li>\n    <li>👨‍🍳 <strong>Chef Report</strong></li>\n    <li>📦 <strong>Orders Report</strong></li>\n  </ul>\n\n  <p>Best regards,<br>\n  <strong style=\"color:#0078D7;\">n8n Automation</strong></p>\n\n  <hr style=\"margin-top:20px;border:none;border-top:1px solid #ccc;\">\n  <p style=\"font-size:12px;color:#777;\">This is an automated message sent by your n8n workflow.</p>\n</div>\n",
+        "options": {
+          "appendAttribution": true,
+          "attachmentsUi": {
+            "attachmentsBinary": [
+              {
+                "property": "file1,file2,file3"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        4176,
+        -320
+      ],
+      "id": "ce59b90a-743a-4e5b-b098-c4380401801d",
+      "name": "Send a message",
+      "webhookId": "7f65f3fa-a4eb-4f4f-992d-f597d847c3c6",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "1osTj9b1g4s_zDmNVqxW7wwAFEiHqkgbbHCU3-ME4WWY",
+          "mode": "id"
+        },
+        "options": {
+          "googleFileConversion": {
+            "conversion": {
+              "sheetsToFormat": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        2416,
+        -528
+      ],
+      "id": "89b797cb-31ec-4e17-91f2-bb52242d4ff6",
+      "name": "Download_Butcher_Report",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "1sG9RY7xLjqmf5bPjFP0vgb3otA-SH3hN79_0me3zStc",
+          "mode": "id"
+        },
+        "options": {
+          "googleFileConversion": {
+            "conversion": {
+              "sheetsToFormat": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        2224,
+        -304
+      ],
+      "id": "1b353f17-642b-4c56-9e3a-e604cf3ad208",
+      "name": "Download_Chef_Report",
+      "executeOnce": true,
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "HRNknBKDkDgOsOyL",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "1mr0DyjQk3MdVic8Q9spLwhBERcv29M1wESGqQbQyGcU",
+          "mode": "id"
+        },
+        "options": {
+          "googleFileConversion": {
+            "conversion": {
+              "sheetsToFormat": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        2224,
+        -32
+      ],
+      "id": "e7d23e36-8fdf-40e4-8e86-906a5a621cf6",
+      "name": "Download_Orders_Report",
+      "executeOnce": true,
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "HRNknBKDkDgOsOyL",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1osTj9b1g4s_zDmNVqxW7wwAFEiHqkgbbHCU3-ME4WWY",
+          "mode": "list",
+          "cachedResultName": "Butcher",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1osTj9b1g4s_zDmNVqxW7wwAFEiHqkgbbHCU3-ME4WWY/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1osTj9b1g4s_zDmNVqxW7wwAFEiHqkgbbHCU3-ME4WWY/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Produkttyp": "={{ $('Group for Butcher').item.json.product_type }}",
+            "Titel EN": "={{ $('Group for Butcher').item.json.title }}",
+            "Gesamtgewicht ": "={{ $('Group for Butcher').item.json.total_weight_kg }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Titel EN",
+              "displayName": "Titel EN",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Titel DE",
+              "displayName": "Titel DE",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Gesamtgewicht ",
+              "displayName": "Gesamtgewicht ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Produkttyp",
+              "displayName": "Produkttyp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1856,
+        -544
+      ],
+      "id": "d2d1ba80-6d84-49f6-80b5-06e433235bfb",
+      "name": "Append_To_Butcher_Sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "fctJKlkWZsRrr2B5",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1sG9RY7xLjqmf5bPjFP0vgb3otA-SH3hN79_0me3zStc",
+          "mode": "list",
+          "cachedResultName": "Chef",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1sG9RY7xLjqmf5bPjFP0vgb3otA-SH3hN79_0me3zStc/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1osTj9b1g4s_zDmNVqxW7wwAFEiHqkgbbHCU3-ME4WWY/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Title of Marinted": "={{ $json.title }}",
+            "Number of dishes": "={{ $json.quantity_total }}",
+            " Total_Weight_KG": "={{ $json.total_weight_kg }}",
+            "Num of Pieces": "={{ $json.num_of_pieces }}",
+            "Marinade ": "={{ $json.variant_title }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Title of Marinted",
+              "displayName": "Title of Marinted",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Marinade ",
+              "displayName": "Marinade ",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": " Total_Weight_KG",
+              "displayName": " Total_Weight_KG",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Num of Pieces",
+              "displayName": "Num of Pieces",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Number of dishes",
+              "displayName": "Number of dishes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1648,
+        -304
+      ],
+      "id": "f8235581-4978-4a29-84f4-1e024ecb7fa3",
+      "name": "Append_To_Chef_Sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "fctJKlkWZsRrr2B5",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1mr0DyjQk3MdVic8Q9spLwhBERcv29M1wESGqQbQyGcU",
+          "mode": "list",
+          "cachedResultName": "Grouped order",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1mr0DyjQk3MdVic8Q9spLwhBERcv29M1wESGqQbQyGcU/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1mr0DyjQk3MdVic8Q9spLwhBERcv29M1wESGqQbQyGcU/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Order_Number": "={{ $json.order_number }}",
+            "Title": "={{ $json.title }}",
+            "Marinated": "={{ $json.marinated }}",
+            "Variant_Title": "={{ $json.variant_title }}",
+            "Grams": "={{ $json.grams }}",
+            "Quantity": "={{ $json.quantity }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Order_Number",
+              "displayName": "Order_Number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Title",
+              "displayName": "Title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Marinated",
+              "displayName": "Marinated",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "check?",
+              "displayName": "check?",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Variant_Title",
+              "displayName": "Variant_Title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Grams",
+              "displayName": "Grams",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Quantity",
+              "displayName": "Quantity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1648,
+        -32
+      ],
+      "id": "7bbbc396-059d-4e86-b722-9d470f0ee217",
+      "name": "Append_To_Orders_Sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "fctJKlkWZsRrr2B5",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Europe/Berlin date, formatted as DD-MM-YYYY (safe for filenames)\nconst today = new Date()\n  .toLocaleDateString('en-GB', { timeZone: 'Europe/Berlin' })\n  .replace(/\\//g, '-');\n\n// Take the three binaries coming from the Merge node\nconst f1 = items[0].binary.data;\nconst f2 = items[1].binary.data;\nconst f3 = items[2].binary.data;\n\n// Give each one a nice, dated filename\nf1.fileName = `Butcher_Report_${today}.xlsx`;\nf2.fileName = `Chef_Report_${today}.xlsx`;\nf3.fileName = `Orders_Report_${today}.xlsx`;\n\n// Return a single item with 3 binary properties + the date in JSON\nreturn [{\n  binary: {\n    file1: f1,\n    file2: f2,\n    file3: f3,\n  },\n  json: {\n    today, // we will use this in the email subject/body\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3856,
+        -320
+      ],
+      "id": "09869805-e24a-478f-9e10-260aa18230bf",
+      "name": "Merge files with live date"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2112,
+        -544
+      ],
+      "id": "eb0a45e0-e98b-4c2e-994e-015b6e1920d2",
+      "name": "Wait",
+      "webhookId": "9e97d628-f0c8-4604-993f-162fffd3cbe7"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1904,
+        -304
+      ],
+      "id": "0b22f21a-3d32-4707-8017-e00d767ced24",
+      "name": "Wait1",
+      "webhookId": "b1cda450-3fd6-492c-8d22-1cdd8301fa9e"
+    },
+    {
+      "parameters": {
+        "amount": 2
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1904,
+        -32
+      ],
+      "id": "ff290ce8-2725-4f90-a66a-03146e0a823e",
+      "name": "Wait2",
+      "webhookId": "0614f452-9041-451b-ab6f-21fe3b9243a8"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 🧩 استقبل ناتج الطلبين\nconst orderItems = $items(\"Code in JavaScript\"); // الطلبات الأصلية\nconst productDetails = $items(\"Flatten Products\"); // تفاصيل المنتج بعد الفلترة\n\n// ⚖️ دالة لتحويل الجرام إلى كجم\nconst toKg = grams => grams ? grams / 1000 : 0;\n\nconst merged = [];\n\nfor (const orderItem of orderItems) {\n  const o = orderItem.json;\n  const productId = String(o.product_id).trim();\n  \n  // 🔍 ابحث عن المنتج المطابق (يغطي كل حالات Shopify ID)\n  const product = productDetails.find(p => {\n    const rawId = String(p.json.id).trim();\n    const cleanProductId = rawId.replace('gid://shopify/Product/', '');\n    const orderId = String(o.product_id).trim();\n    return (\n      cleanProductId === orderId || rawId.endsWith(orderId)\n    );\n  });\n  \n  // 🧾 اربط التفاصيل\n  const productType = product?.json.product_type || 'Unknown';\n  const collections = product?.json.collections || '';\n  \n  // ⚖️ احسب الوزن بالكيلو\n  const totalWeightKg = toKg(o.grams * o.quantity);\n  \n  // ✅ أضف الـ variant_title\n  const variantTitle = o.variant_title || 'Default';\n  \n  // 🔢 استخراج عدد القطع من variant_title\n  const pieceMatch = variantTitle.match(/(\\d+)\\s*(?:pieces?|pcs?)/i);\n  const numOfPieces = pieceMatch ? Number(pieceMatch[1]) : 0;\n  \n  // ✅ تحقق من وجود كلمة \"piece\"\n  const isPiece = variantTitle.toLowerCase().includes('piece') ? 'Yes' : 'No';\n  \n  // 🌶️ تحديد حالة التتبيل - ابحث في variant_title عن \"Marinade\" أو \"Marinated\"\n  // ✅ لكن استثني \"Unmarinated\"\n  let marinated = 'No';\n  if (/marinade|marinated/i.test(variantTitle) && !/unmarinated/i.test(variantTitle)) {\n    marinated = 'Yes';\n  }\n  \n  // 📦 أضف الناتج النهائي\n  merged.push({\n    json: {\n      order_number: o.order_number,\n      title: o.title,\n      variant_title: variantTitle,\n      is_piece: isPiece,\n      num_of_pieces: numOfPieces,\n      grams: o.grams,\n      quantity: o.quantity,\n      total_weight_kg: totalWeightKg.toFixed(2),\n      product_type: productType,\n      marinated: marinated,\n      fulfillment_status: o.fulfillment_status,\n      collections\n    }\n  });\n}\n\nreturn merged;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        112,
+        -320
+      ],
+      "id": "f79af55b-66fe-424c-baed-f33101cc293e",
+      "name": "Merge Product Details"
+    },
+    {
+      "parameters": {
+        "jsCode": "const edges = items[0].json.data.products.edges;\n\nreturn edges.map(e => ({\n  json: {\n    id: e.node.id.replace(\"gid://shopify/Product/\", \"\"),\n    title: e.node.title,\n    product_type: e.node.productType,\n    collections: (e.node.collections.edges || [])\n      .map(c => c.node.title)\n      .join(\", \")\n  }\n}));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -272,
+        -320
+      ],
+      "id": "8e077096-4d17-4a71-ab85-f3b5cb71fca2",
+      "name": "Flatten Products"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"query\": \"{ products(first: 250, query: \\\"status:active\\\") { edges { node { id title productType status collections(first: 5) { edges { node { title } } } } } } }\"\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -512,
+        -320
+      ],
+      "id": "eded22f9-71d7-4a93-a320-678f5191e129",
+      "name": "Shopify GraphQL - All Products",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "jsCode": "const mergedItems = $input.all().map(i => i.json);\n\n// Split chef items until the first item that contains order_number\nconst chefItems = [];\nconst orderItems = [];\nconst butcherItems = []; // Add butcher items array\nlet foundOrderStart = false;\n\nfor (const item of mergedItems) {\n  if (!foundOrderStart && !item.order_number) {\n    chefItems.push(item);\n  } else {\n    foundOrderStart = true;\n    orderItems.push(item);\n  }\n}\n\n// Get ALL butcher items from input 3 (index 2)\nconst butcherInputs = $input.all();\nif (butcherInputs.length > 2) {\n  // Get all items from input 3\n  const input3Items = $('Group for Butcher').all();\n  input3Items.forEach(item => {\n    if (item.json) {\n      butcherItems.push(item.json);\n    }\n  });\n}\n\n// Limit for token usage control\nconst chefLimited = chefItems.slice(0, 150);\nconst orderLimited = orderItems.slice(0, 250);\nconst butcherLimited = butcherItems.slice(0, 150); // Limit butcher items\n\nreturn [\n  {\n    json: {\n      chefItems: chefLimited,\n      orderItems: orderLimited,\n      butcherItems: butcherLimited // Add butcher items to output\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1952,
+        256
+      ],
+      "id": "e98786c5-7b53-4b89-88c1-68e9ea7a3873",
+      "name": "Prepare Prompt Data",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "numberInputs": 3
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1600,
+        240
+      ],
+      "id": "204258f7-7db9-4be3-81b5-8ead4ebfe8b4",
+      "name": "Merge1",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{\n(() => {\n  const chefItems = $json.chefItems || [];\n  const orderItems = $json.orderItems || [];\n  const butcherItems = $json.butcherItems || [];\n\n  return `\nأنت مساعد ذكي في قسم تجهيز الطلبات داخل مطبخ مركزي.\n\n📦 البيانات اليومية:\n\n- chefItems: جدول يحتوي على المنتجات التي تحتاج تتبيل.\n- orderItems: جدول يحتوي على تفاصيل الطلبات اليومية.\n- butcherItems: جدول يحتوي على المنتجات التي تم تسليمها من الجزار.\n\n🎯 المطلوب:\n\nاكتب تقريرًا واضحًا ومنظمًا باللغة العربية لتوجيه الشيف اليوم، يتضمن:\nالخطوه الاولي \n التأكد من أن الوزن الكلي في butcherItems يساوي العدد في جدول التجميع.\nكتابة اسم المنتج و الوزن اوا العدد لو مكتوب ST\n\n\nالخطوه الثانيه\nمراجعة شيت المتبلات وفصل اللحوم اللي هتتبل عن باقي الطلبية.\n\nالخطوه التالته \nتوزيع المنتجات المتبلة في علب التتبيل المناسبة ووضعها في الثلاجة لمدة ٢٠ دقيقة (كل نوع تتبيلة في علبة منفصلة).\n\nالخطوه الرابعه \nوزن المنتجات الغير متبلة وتوزيعها في أطباق الأوردرات، وتجهيزها بجانب بعضها لفكيمها.\n\nالخطوه الخامسه \nأثناء فكيمة الأطباق، تغليف المنتجات السليمة الغير متبلة (مثل الفرخة الكاملة والصدر الكامل وكتف الخروف) أو المنتجات اللي بالعدد (دبابيس - وراك).\n\nالخطوه السادسه \nإخراج اللحوم المتبلة من التلاجة وتوزيعها في الأطباق وبدء فكيمها.\n\nالخطوه السابعه \nترتيب المنتجات المتشابهة فوق بعضها ووضع اللابلز.\n\nالخطوه التامنه \nتوزيع المنتجات في الأوردرات حسب الشيت.\n\n🧠 البيانات:\n\n- chefItems:\n${JSON.stringify(chefItems.slice(0,50), null, 2)}\n\n- orderItems:\n${JSON.stringify(orderItems.slice(0,150), null, 2)}\n\n- butcherItems:\n${JSON.stringify(butcherItems.slice(0,50), null, 2)}\n\n📌 المطلوب: توليد تقرير تنفيذي للشيف، منظم في فقرات، باللغة العربية.\n  `;\n})()\n}}\n",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        2176,
+        256
+      ],
+      "id": "69c5193a-4113-4602-b9a9-29b73d07ce8b",
+      "name": "AI Agent",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        2128,
+        416
+      ],
+      "id": "de0c92d6-76bd-485d-80ac-23da5bfb9cd6",
+      "name": "Google Gemini Chat Model",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        3104,
+        240
+      ],
+      "id": "06351d58-7d3b-4283-95a9-7ccadc9ca9f9",
+      "name": "Send a text message",
+      "webhookId": "b53d15e4-7580-43d4-b99e-5ad124c3d436",
+      "credentials": {
+        "telegramApi": {
+          "id": "Bpas9XYRDKZpADFI",
+          "name": "Telegram account"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "batchSize": "={{ $items(\"Message too long?\").length }}\n",
+        "options": {
+          "reset": false
+        }
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        2768,
+        256
+      ],
+      "id": "8b3278db-3c5a-460d-9a92-cf17342de2a9",
+      "name": "Loop Over Items",
+      "disabled": true
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "name": "Replace Me",
+      "typeVersion": 1,
+      "position": [
+        3296,
+        400
+      ],
+      "id": "e1ef4b57-c3dd-4128-8c04-6891e03f218d",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "let aiResponse = $input.item.json.output || $input.item.json.text || \"\";\n\nconst MAX_LENGTH = 3900; // الحد الأقصى\n\n// نضف النص\nfunction cleanText(text) {\n    if (!text) return \"\";\n    text = text.replace(/<[^>]+>/g, '');\n    text = text.replace(/\\*\\*([^*]+)\\*\\*/g, '$1');\n    text = text.replace(/\\*([^*]+)\\*/g, '$1');\n    text = text.replace(/__([^_]+)__/g, '$1');\n    text = text.replace(/_([^_]+)_/g, '$1');\n    text = text.replace(/`([^`]+)`/g, '$1');\n    return text.trim();\n}\n\n// نضف النص\nlet cleaned = cleanText(aiResponse);\n\n// لو النص قصير، ارجعه كده\nif (cleaned.length <= MAX_LENGTH) {\n    return {\n        json: {\n            text: cleaned\n        }\n    };\n}\n\n// لو النص طويل، قسمه\nlet messages = [];\nlet remaining = cleaned;\n\nwhile (remaining.length > 0) {\n    if (remaining.length <= MAX_LENGTH) {\n        messages.push(remaining);\n        break;\n    }\n    \n    // جيب آخر سطر قبل الحد الأقصى\n    let chunk = remaining.substring(0, MAX_LENGTH);\n    let lastNewline = chunk.lastIndexOf('\\n');\n    \n    if (lastNewline > MAX_LENGTH * 0.5) {\n        chunk = remaining.substring(0, lastNewline);\n        remaining = remaining.substring(lastNewline + 1);\n    } else {\n        remaining = remaining.substring(MAX_LENGTH);\n    }\n    \n    messages.push(chunk);\n}\n\n// أضف رقم الجزء\nreturn messages.map((msg, index) => ({\n    json: {\n        text: `📨 جزء ${index + 1}/${messages.length}\\n\\n${msg}`\n    }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2512,
+        256
+      ],
+      "id": "d6203a66-864c-4eca-9164-ad4963db08bd",
+      "name": "Message too long?",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "operation": "clear",
+        "documentId": {
+          "__rl": true,
+          "value": "1osTj9b1g4s_zDmNVqxW7wwAFEiHqkgbbHCU3-ME4WWY",
+          "mode": "list",
+          "cachedResultName": "Butcher",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1osTj9b1g4s_zDmNVqxW7wwAFEiHqkgbbHCU3-ME4WWY/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1osTj9b1g4s_zDmNVqxW7wwAFEiHqkgbbHCU3-ME4WWY/edit#gid=0"
+        },
+        "keepFirstRow": true
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1712,
+        -688
+      ],
+      "id": "40f9b2d1-a5f8-4b44-b89e-733dd1246d85",
+      "name": "Clear Butcher sheet",
+      "executeOnce": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "fctJKlkWZsRrr2B5",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "clear",
+        "documentId": {
+          "__rl": true,
+          "value": "1sG9RY7xLjqmf5bPjFP0vgb3otA-SH3hN79_0me3zStc",
+          "mode": "list",
+          "cachedResultName": "Chef",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1sG9RY7xLjqmf5bPjFP0vgb3otA-SH3hN79_0me3zStc/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1sG9RY7xLjqmf5bPjFP0vgb3otA-SH3hN79_0me3zStc/edit#gid=0"
+        },
+        "keepFirstRow": true
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1152,
+        -384
+      ],
+      "id": "b2e145fa-e11b-432b-bb1d-265d7efe04d3",
+      "name": "Clear  Chef sheet",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "clear",
+        "documentId": {
+          "__rl": true,
+          "value": "1mr0DyjQk3MdVic8Q9spLwhBERcv29M1wESGqQbQyGcU",
+          "mode": "list",
+          "cachedResultName": "Grouped order",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1mr0DyjQk3MdVic8Q9spLwhBERcv29M1wESGqQbQyGcU/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1mr0DyjQk3MdVic8Q9spLwhBERcv29M1wESGqQbQyGcU/edit#gid=0"
+        },
+        "keepFirstRow": true
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1152,
+        -128
+      ],
+      "id": "4b79882d-f2c3-42c5-80a9-3c63328e80fe",
+      "name": "Clear Orders Sheet",
+      "executeOnce": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "fctJKlkWZsRrr2B5",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every 2 Days": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Shopify GraphQL - All Products",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Group for Butcher": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Group for Chef": {
+      "main": [
+        [
+          {
+            "node": "Clear  Chef sheet",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Append_To_Chef_Sheet",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields1": {
+      "main": [
+        [
+          {
+            "node": "createdAt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "createdAt": {
+      "main": [
+        [
+          {
+            "node": "Clear Butcher sheet",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Append_To_Butcher_Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Group Orders for Chef": {
+      "main": [
+        [
+          {
+            "node": "Clear Orders Sheet",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Append_To_Orders_Sheet",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Butcher_Report": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "For Chef": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "For Orders": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Merge files with live date",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download_Butcher_Report": {
+      "main": [
+        [
+          {
+            "node": "Butcher_Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download_Chef_Report": {
+      "main": [
+        [
+          {
+            "node": "For Chef",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download_Orders_Report": {
+      "main": [
+        [
+          {
+            "node": "For Orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append_To_Butcher_Sheet": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append_To_Chef_Sheet": {
+      "main": [
+        [
+          {
+            "node": "Wait1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append_To_Orders_Sheet": {
+      "main": [
+        [
+          {
+            "node": "Wait2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge files with live date": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Download_Butcher_Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait1": {
+      "main": [
+        [
+          {
+            "node": "Download_Chef_Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait2": {
+      "main": [
+        [
+          {
+            "node": "Download_Orders_Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Product Details": {
+      "main": [
+        [
+          {
+            "node": "Group for Butcher",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Group Orders for Chef",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Group for Chef",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shopify GraphQL - All Products": {
+      "main": [
+        [
+          {
+            "node": "Flatten Products",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Flatten Products": {
+      "main": [
+        [
+          {
+            "node": "Merge Product Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge1": {
+      "main": [
+        [
+          {
+            "node": "Prepare Prompt Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Prompt Data": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Message too long?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Replace Me",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Replace Me": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message too long?": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clear Butcher sheet": {
+      "main": [
+        []
+      ]
+    },
+    "Clear  Chef sheet": {
+      "main": [
+        []
+      ]
+    },
+    "Clear Orders Sheet": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "30629fc5-4fa6-4b78-b13b-b2adf084897d",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "b6b9974f377db0a7adc8e54df2d213aac246bf1a14c2eae1926f215eaf08407d"
+  },
+  "id": "B4mj3qRH6Czr3Kxi",
+  "tags": []
+}
